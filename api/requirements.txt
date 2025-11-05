@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+transformers
+diffusers
+torch
+opencv-python
+Pillow
+accelerate
+python-multipart
+numpy
+scikit-image
+xformers
+safetensors
+controlnet-aux

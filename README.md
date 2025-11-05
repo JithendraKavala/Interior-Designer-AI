@@ -153,6 +153,14 @@ See `outputs/` for example generated designs:
 
 You can open them directly or embed them in your documentation/UI as needed.
 
+### Inline Previews
+
+![App Screenshot](output/app-screenshot.png)
+
+![Sample Output 1](outputs/image.png)
+
+![Sample Output 2](outputs/image%20copy.png)
+
 ## Notes
 
 - GPU (CUDA) is auto-detected; otherwise optimized CPU execution is used.

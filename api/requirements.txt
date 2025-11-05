@@ -12,3 +12,4 @@ scikit-image
 xformers
 safetensors
 controlnet-aux
+boto3

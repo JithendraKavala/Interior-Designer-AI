@@ -8,6 +8,10 @@ import json
 import asyncio
 from typing import Optional, Dict, Any
 import logging
+from io import BytesIO
+
+import boto3
+from botocore.client import Config
 
 from model_loader import get_models
 from generate import generate_image
@@ -42,6 +46,57 @@ pipe, depth_estimator = get_models()
 # Ensure directories exist
 os.makedirs("images", exist_ok=True)
 os.makedirs("temp", exist_ok=True)
+
+# --- Cloudflare R2 configuration ---
+R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID")
+R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID")
+R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY")
+R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME")
+R2_PUBLIC_BASE_URL = os.getenv("R2_PUBLIC_BASE_URL")  # e.g. https://pub-xxxx.r2.dev
+
+_r2_enabled = all([R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME])
+if _r2_enabled:
+    r2_endpoint = f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+    s3_client = boto3.client(
+        "s3",
+        endpoint_url=r2_endpoint,
+        aws_access_key_id=R2_ACCESS_KEY_ID,
+        aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+        config=Config(signature_version="s3v4"),
+        region_name="auto",
+    )
+else:
+    s3_client = None
+
+
+def _upload_image_return_url(image: Image.Image, key: str) -> str:
+    """Upload an image to R2 (if configured) and return a URL to access it.
+
+    Fallback: saves locally under images/ and returns the local file-serving endpoint.
+    """
+    if _r2_enabled and s3_client is not None:
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        buffer.seek(0)
+        s3_client.put_object(
+            Bucket=R2_BUCKET_NAME,
+            Key=key,
+            Body=buffer,
+            ContentType="image/png",
+        )
+        if R2_PUBLIC_BASE_URL:
+            return f"{R2_PUBLIC_BASE_URL.rstrip('/')}/{key}"
+        # Presigned fallback if no public base URL configured
+        return s3_client.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={"Bucket": R2_BUCKET_NAME, "Key": key},
+            ExpiresIn=3600,
+        )
+
+    # Local fallback
+    local_path = f"images/{key}"
+    image.save(local_path)
+    return f"/images/{key}"
 
 @app.get("/")
 async def root():
@@ -88,22 +143,13 @@ async def generate(
         else:
             logger.warning("❌ Output dimensions do not match input dimensions")
 
-        # Save image and convert to base64 for frontend display
-        output_path = f"images/{uuid.uuid4()}.png"
-        output_image.save(output_path)
-        
-        # Convert to base64 data URL for frontend
-        from io import BytesIO
-        import base64
-        
-        buffer = BytesIO()
-        output_image.save(buffer, format='PNG')
-        img_str = base64.b64encode(buffer.getvalue()).decode()
-        data_url = f"data:image/png;base64,{img_str}"
-        
+        # Upload and return URL(s)
+        key = f"{uuid.uuid4()}.png"
+        url = _upload_image_return_url(output_image, key)
+
         return JSONResponse({
             "success": True,
-            "output": [data_url, data_url],  # Return base64 data URL instead of file path
+            "output": [url, url],
             "settings_used": settings_dict,
             "input_dimensions": [input_width, input_height],
             "output_dimensions": [output_width, output_height]
@@ -156,22 +202,13 @@ async def generate_advanced(
         # Generate image
         output_image = generate_image_advanced(prompt, input_image, pipe, depth_estimator, default_settings)
         
-        # Save output and convert to base64
-        output_path = f"images/{uuid.uuid4()}.png"
-        output_image.save(output_path)
-        
-        # Convert to base64 data URL for frontend
-        from io import BytesIO
-        import base64
-        
-        buffer = BytesIO()
-        output_image.save(buffer, format='PNG')
-        img_str = base64.b64encode(buffer.getvalue()).decode()
-        data_url = f"data:image/png;base64,{img_str}"
-        
+        # Upload and return URL(s)
+        key = f"{uuid.uuid4()}.png"
+        url = _upload_image_return_url(output_image, key)
+
         return JSONResponse({
             "success": True,
-            "output": [data_url, data_url],
+            "output": [url, url],
             "settings_used": default_settings
         })
         
@@ -228,27 +265,17 @@ async def generate_variations(
             prompt, input_image, pipe, depth_estimator, default_settings, num_variations
         )
         
-        # Save all variations and convert to base64
-        from io import BytesIO
-        import base64
-        
-        output_data_urls = []
+        # Upload all variations and return URLs
+        urls = []
         for i, variation in enumerate(variations):
-            # Save to file
-            output_path = f"images/{uuid.uuid4()}_var_{i}.png"
-            variation.save(output_path)
-            
-            # Convert to base64 data URL
-            buffer = BytesIO()
-            variation.save(buffer, format='PNG')
-            img_str = base64.b64encode(buffer.getvalue()).decode()
-            data_url = f"data:image/png;base64,{img_str}"
-            output_data_urls.append(data_url)
-        
+            key = f"{uuid.uuid4()}_var_{i}.png"
+            url = _upload_image_return_url(variation, key)
+            urls.append(url)
+
         return JSONResponse({
             "success": True,
-            "variations": output_data_urls,
-            "num_generated": len(output_data_urls),
+            "variations": urls,
+            "num_generated": len(urls),
             "settings_used": default_settings
         })
         
@@ -271,18 +298,39 @@ async def get_model_info():
         "optimizations": {
             "memory_efficient_attention": True,
             "cpu_offload": pipe.device.type == "cuda"
+        },
+        "storage": {
+            "r2_enabled": _r2_enabled,
+            "bucket": R2_BUCKET_NAME if _r2_enabled else None,
         }
     }
 
 # Serve static files
 @app.get("/images/{image_name}")
 async def get_image(image_name: str):
-    """Serve generated images"""
+    """Serve generated images from local fallback storage."""
     image_path = f"images/{image_name}"
     if os.path.exists(image_path):
         return FileResponse(image_path, media_type="image/png")
-    else:
+    raise HTTPException(status_code=404, detail="Image not found")
+
+
+@app.delete("/images/{image_key}")
+async def delete_image(image_key: str):
+    """Delete a generated image either from R2 (if configured) or local storage."""
+    try:
+        if _r2_enabled and s3_client is not None:
+            s3_client.delete_object(Bucket=R2_BUCKET_NAME, Key=image_key)
+            return {"success": True, "message": "Image deleted from R2"}
+
+        # Local fallback
+        image_path = f"images/{image_key}"
+        if os.path.exists(image_path):
+            os.remove(image_path)
+            return {"success": True, "message": "Image deleted from local storage"}
         raise HTTPException(status_code=404, detail="Image not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     import uvicorn

@@ -155,11 +155,12 @@ You can open them directly or embed them in your documentation/UI as needed.
 
 ### Inline Previews
 
-![App Screenshot](output/app-screenshot.png)
-
+-App Screenshot
+![App Screenshot](outputs/app-screenshot.png)
+-Sample Output 1
 ![Sample Output 1](outputs/image.png)
-
-![Sample Output 2](outputs/image%20copy.png)
+-Sample Output 2
+![Sample Output 2](outputs/image2.png)
 
 ## Notes
 
